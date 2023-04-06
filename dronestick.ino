@@ -11,12 +11,14 @@ extern "C" {
 
 #define DEBUG
 
-const uint8_t servo_pin=5;
+const uint8_t servoPitch_pin=5, servoRoll_pin=6;
 
-float input,output,setpoint=90.0;
-Servo servo;
+float pitch,outputPitch,setpointPitch=0.0,
+   roll,outputRoll,setpointRoll=0.0;
+Servo servoPitch, servoRoll;
 Adafruit_MPU6050 mpu;
-QuickPID pid(&input,&output,&setpoint,0.5,0.2,0.1,QuickPID::Action::direct);
+QuickPID pidPitch(&pitch,&outputPitch,&setpointPitch,0.5,0.2,0.1,QuickPID::Action::direct),
+  pidRoll(&roll,&outputRoll,&setpointRoll,0.5,0.2,0.1,QuickPID::Action::direct);
 TwoWire i2c(sda_pin,scl_pin);
 MbedSPI spi(radio_miso,radio_mosi,radio_sck);
 uint32_t syncword=0;//0xF3AA180C;
@@ -24,23 +26,25 @@ uint8_t channels[] = {0,0,0,0,0,0,0,0};//{34, 74, 4, 44, 29, 69, 9, 49};
 unsigned long tLast=0;
 int nConsecutiveTimeout;
 
-void getConfig() {
-  /*EEPROM.begin(16);
-  syncword=0xF3000000|EEProm.read(0)<<16|EEprom.read(1)<<8|EEprom.read(2);
-  for (int i=0;i<8;i++)
-    channels[i]=EEPROM.read(i+3);
-  EEPROM.end()*/
-}
+typedef struct {
+  uint32_t syncword;
+  uint8_t channels[8];
+} Config;
 
 void saveConfig() {
-  /*EEPROM.begin(16);
-  EEPROM.write(0,syncword&0xFF);
-  EEPROM.write(1,(syncword>>8)&0xFF);
-  EEPROM.write(2,(syncword>>16)&0xFF);
-  for (int i=0;i<8;i++)
-    EEPROM.write(i+2,channels[i]);
-  EEPROM.commit();
-  EEPROM.end();*/
+  Config cfg;
+  cfg.syncword=syncword;
+  memcpy(cfg.channels,channels,sizeof channels);
+  noInterrupts();
+  flash_range_erase((PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE), FLASH_SECTOR_SIZE);
+  flash_range_program((PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE), (uint8_t *)&cfg, FLASH_PAGE_SIZE);
+  interrupts();
+}
+
+void getConfig() {
+  Config *pCfg=(Config *)(XIP_BASE+PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE);
+  syncword=pCfg->syncword;
+  memcpy(channels,pCfg->channels,sizeof channels);
 }
 
 void setup(void) {
@@ -72,8 +76,10 @@ void setup(void) {
   LT8920Begin(syncword);
   LT8920StartListening(syncword==0?33:channels[0]);
   
-  servo.attach(servo_pin);
-  servo.write(0);
+  servoPitch.attach(servoPitch_pin);
+  servoPitch.write(0);
+  servoRoll.attach(servoRoll_pin);
+  servoRoll.write(0);
 
   i2c.begin();
   mpu.begin(MPU6050_I2CADDR_DEFAULT,&i2c);
@@ -81,8 +87,11 @@ void setup(void) {
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
-  pid.SetOutputLimits(0,180);
-  pid.SetMode(QuickPID::Control::automatic);
+  pidPitch.SetOutputLimits(0,180);
+  pidPitch.SetMode(QuickPID::Control::automatic);
+
+  pidRoll.SetOutputLimits(0,180);
+  pidRoll.SetMode(QuickPID::Control::automatic);
 
   delay(100);
 }
@@ -107,8 +116,6 @@ void buf2pwm(uint8_t buf[],uint16_t pwm[]) {
 }
 
 bool rx(uint16_t pwm[],bool pairing=false) {
-//TODO: pairing
-
   static bool connected=false;
   uint8_t  buf[32];
   uint16_t status=LT8920ReadRegister(R_STATUS);
@@ -140,6 +147,7 @@ bool rx(uint16_t pwm[],bool pairing=false) {
   int n = LT8920Read(buf, sizeof buf);
   if (pairing) {
     if (n==20) {
+      tLast=millis();
       syncword=0xF3000000|buf[1]<<16|buf[2]<<8|buf[3];
       for (int i=0;i<8;i++)
         channels[i]=buf[i+4];
@@ -177,9 +185,8 @@ void failSafe() {
 void loop() {
   uint16_t pwm[6];
 
-  digitalWrite(LED_BUILTIN,millis()%1000<50?HIGH:LOW);
-
   bool connected=rx(pwm,syncword==0);
+  digitalWrite(LED_BUILTIN,millis()%(connected?250:1000)<50?HIGH:LOW);
 
   if (connected) {
     //TODO:
@@ -190,14 +197,21 @@ void loop() {
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
 
-  int value = a.acceleration.y;
-  value = map(value,  -10, 10, 180, 0);
-  input=value;
-  if(pid.Compute()) {
-    // Serial.print("value: ");
-    // Serial.print(value);
-    // Serial.print("\toutput: ");
-    // Serial.println(output);
+  pitch=map(a.acceleration.y,  -10, 10, 180, 0);;
+  if(pidPitch.Compute()) {
+    // Serial.print("pitch: ");
+    // Serial.print(pitch);
+    // Serial.print("\toutputPitch: ");
+    // Serial.println(outputPitch);
   }
-  servo.write(output);
+  servoPitch.write(outputPitch);
+  
+  roll = map(a.acceleration.x,  -10, 10, 180, 0);
+  if(pidPitch.Compute()) {
+    // Serial.print("roll: ");
+    // Serial.print(roll);
+    // Serial.print("\toutputRoll: ");
+    // Serial.println(outputRoll);
+  }
+  servoRoll.write(outputRoll);
 } 
